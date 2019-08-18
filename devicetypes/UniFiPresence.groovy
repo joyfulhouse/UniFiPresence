@@ -1,5 +1,5 @@
 /**
-*  Copyright 2018 Bryan Li
+*  Copyright 2019 Bryan Li
 *
 *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
 *  in compliance with the License. You may obtain a copy of the License at:
@@ -18,11 +18,14 @@
 */
 
 metadata {
-	definition (name: "UniFi Presence", namespace: "joyfulhouse", author: "Bryan Li") {
+	definition (name: "UniFi WiFi Presence", namespace: "joyfulhouse", author: "Bryan Li") {
 		capability "Configuration"
 		capability "Presence Sensor"
 		capability "Polling"
 		capability "Refresh"
+        
+        attribute "bssid", "String"
+        attribute "last_seen", "String"
 	}
 
 	// simulator metadata
@@ -124,38 +127,48 @@ def getClientByMAC() {
         initialize()
     }
     
-    if(!state.cookies.getAt(0)){
-     	initialize()   
+    if(!state.cookies){
+     	initialize()
     }
     
 	if (settings.ip != null && settings.port != null && state.cookies.getAt(0) != "" ) {
         
         def params = [
             uri: "https://${settings.ip}:${settings.port}",
-            path: "/api/s/default/stat/sta/${settings.mac}",
-            headers: ['Cookie': state.cookies.getAt(0)]
+            path: "/api/s/default/stat/user/${settings.mac}",
+            headers: ['Cookie': state.cookies.join(";")]
         ]
         
         try {
             httpGet(params) { resp ->
-                parseStats(resp)
+                parseUser(resp)
            	}
-        } catch (e) {
-            log.debug "Something went wrong: ${e}"
-            log.debug "Params: ${params}"
-            initialize()
-            handlePresenceEvent(false)
+        } catch (groovyx.net.http.HttpResponseException ex) {
+            // Either bad MAC or user is gone
+            if(device.currentState("presence")?.value != "not present") {
+        	    handlePresenceEvent(false)
+            } else {
+                log.debug "${device.label} has not returned since ${device.currentState("last_seen")}"
+            }
+        } catch (Exception ex) {
+            log.debug "Fatal error occurred"   
         }
     } else {
     	login()
     }
 }
 
-def parseStats(response) {
+def parseUser(response) {
     def meta = response.data.meta
     if(meta.rc == "ok"){
         def data = response.data.data
         def timeDiff = now()/1000L - data.last_seen
+        
+        sendEvent(name: "last_seen", value: data.last_seen)
+        
+        if(device.currentState("bssid")?.value != data.bssid){
+            sendEvent(name: "bssid", value: data.bssid)
+        }
         
         if(device.currentState("presence")?.value == "present"){
             if(timeDiff > 300){
@@ -174,7 +187,8 @@ def parseStats(response) {
                 log.debug "${device.label} has not returned since ${data.last_seen}"
             }
         }
-    } else if(meta.msg == "api.err.UnknownStation"){
+    } else if(meta.msg == "api.err.UnknownStation" || meta.msg == "api.err.UnknownUser"){
+        log.debug "Here ${device.currentState("presence")?.value}"
     	if(device.currentState("presence")?.value != "not present"){
         	handlePresenceEvent(false)
         }
